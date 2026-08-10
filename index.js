@@ -5,6 +5,10 @@ const yaml = require("js-yaml");
 const { LocalIndex } = require("vectra");
 const AdmZip = require("adm-zip");
 const bm25Engine = require("./bm25_engine");
+const {
+    buildScopedIgnoreFilter,
+    normalizeIgnoreIds,
+} = require("./ignore_filter");
 
 let stProxyConfig = {
     enabled: false,
@@ -605,18 +609,25 @@ async function queryMultiIndices(
     taskTag = "RAG",
     recentWeight = 0,
     currentSessionId = null,
+    ignoreIds = [],
 ) {
     console.log(
         `[Anima Debug] [${taskTag}] 🚀 并行检索 ${indices.length} 个库...`,
     );
 
     const promises = indices.map(async (idx) => {
-        // 原有的查询逻辑
-        const results = await queryIndexSafe(idx, vector, k, filter);
+        const sourceCollection = idx._debug_id || null;
+        const scopedFilter = buildScopedIgnoreFilter(
+            filter,
+            sourceCollection,
+            currentSessionId,
+            ignoreIds,
+        );
+        const results = await queryIndexSafe(idx, vector, k, scopedFilter);
 
         // 🔥 [修改这里] 为每个结果附带来源库的 ID
         return results.map((res) => {
-            res._source_collection = idx._debug_id || "unknown_lib";
+            res._source_collection = sourceCollection || "unknown_lib";
 
             // 🟢 [新增核心逻辑] 近因加权：只对当前数据库的分数进行提升
             if (
@@ -690,8 +701,7 @@ async function performDynamicStrategy(indices, vector, config, ignoreIds = []) {
     });
 
     const buildFilter = (stepFilter = {}) => {
-        if (!ignoreIds || ignoreIds.length === 0) return stepFilter;
-        return { ...stepFilter, index: { $nin: ignoreIds } };
+        return stepFilter;
     };
 
     let detectedVibeTag = null;
@@ -933,6 +943,7 @@ async function performDynamicStrategy(indices, vector, config, ignoreIds = []) {
                     "Step: BASE",
                     recentWeight,
                     currentSessionId,
+                    ignoreIds,
                 );
 
                 // 🌟 原生 Vibe Tag 捕获逻辑 (完全没改)
@@ -972,6 +983,7 @@ async function performDynamicStrategy(indices, vector, config, ignoreIds = []) {
                             "Step: IMPORTANT",
                             recentWeight,
                             currentSessionId,
+                            ignoreIds,
                         ),
                     );
                     const impResults = await Promise.all(impPromises);
@@ -1022,6 +1034,7 @@ async function performDynamicStrategy(indices, vector, config, ignoreIds = []) {
                             "Step: STATUS",
                             recentWeight,
                             currentSessionId,
+                            ignoreIds,
                         ),
                     );
                     const statusResults = await Promise.all(statusPromises);
@@ -1055,6 +1068,7 @@ async function performDynamicStrategy(indices, vector, config, ignoreIds = []) {
                             "Step: PERIOD",
                             recentWeight,
                             currentSessionId,
+                            ignoreIds,
                         ),
                     );
                     const periodResults = await Promise.all(periodPromises);
@@ -1091,6 +1105,7 @@ async function performDynamicStrategy(indices, vector, config, ignoreIds = []) {
                             "Step: SPECIAL",
                             recentWeight,
                             currentSessionId,
+                            ignoreIds,
                         ),
                     );
                     const specialResults = await Promise.all(specialPromises);
@@ -1119,6 +1134,7 @@ async function performDynamicStrategy(indices, vector, config, ignoreIds = []) {
                         "Chat",
                         recentWeight,
                         currentSessionId,
+                        ignoreIds,
                     );
                 }
                 break;
@@ -1139,6 +1155,7 @@ async function performDynamicStrategy(indices, vector, config, ignoreIds = []) {
                         "Step: DIVERSITY",
                         recentWeight,
                         currentSessionId,
+                        ignoreIds,
                     );
                 } else {
                     candidates = await queryMultiIndices(
@@ -1149,6 +1166,7 @@ async function performDynamicStrategy(indices, vector, config, ignoreIds = []) {
                         "Step: DIVERSITY",
                         recentWeight,
                         currentSessionId,
+                        ignoreIds,
                     );
                 }
                 break;
@@ -2166,6 +2184,9 @@ async function init(router) {
                 strategy: legacyStrategy,
             };
             const kbContext = req.body.kbContext || { ids: [], strategy: null };
+            const safeIgnoreIds = normalizeIgnoreIds(ignore_ids);
+            const ignoreCollectionId =
+                chatContext.strategy?.current_session_id || null;
 
             // 2. 向量化
             if (!searchText && !bm25SearchText)
@@ -2268,9 +2289,6 @@ async function init(router) {
                 const uniqueIndices = [...new Set(rawIndices)];
                 if (uniqueIndices.length === 0) return [];
 
-                const safeIgnoreIds = Array.isArray(ignore_ids)
-                    ? ignore_ids
-                    : [];
                 const strat = chatContext.strategy;
 
                 if (strat && strat.enabled) {
@@ -2289,11 +2307,6 @@ async function init(router) {
                         strat?.steps?.find((s) => s.type === "base")?.count ||
                         5;
                     const minScore = strat?.min_score || 0;
-                    const simpleFilter =
-                        safeIgnoreIds.length > 0
-                            ? { index: { $nin: safeIgnoreIds } }
-                            : null;
-
                     // 🟢 [新增] 获取参数
                     const recentWeight = strat?.recent_weight || 0;
                     const currentSessionId = strat?.current_session_id || null;
@@ -2302,10 +2315,11 @@ async function init(router) {
                         uniqueIndices,
                         vector,
                         simpleCount * 1.5,
-                        simpleFilter,
+                        null,
                         "SimpleChat",
                         recentWeight, // 🟢 [新增透传]
                         currentSessionId, // 🟢 [新增透传]
+                        safeIgnoreIds,
                     );
                     raw["_debug_logs"] = raw["_debug_logs"] || [];
                     raw["_debug_logs"].push({
@@ -2517,7 +2531,8 @@ async function init(router) {
                         uniqueUserEntities,
                         bm25Configs.chat,
                         temporalIntent,
-                        ignore_ids,
+                        safeIgnoreIds,
+                        ignoreCollectionId,
                     );
 
                     intentResults = intentResults.map((r) => {
@@ -2571,7 +2586,8 @@ async function init(router) {
                         bm25Configs.chat,
                         remainingK,
                         "chat",
-                        ignore_ids,
+                        safeIgnoreIds,
+                        ignoreCollectionId,
                     );
                     console.log(
                         `[Anima BM25 Debug] 📊 常规模糊检索执行完毕，返回了 ${standardResults.length} 条结果。`,

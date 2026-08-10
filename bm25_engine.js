@@ -2,6 +2,12 @@ const fs = require("fs");
 const path = require("path");
 const MiniSearch = require("minisearch");
 const { add_word, cut_for_search } = require("jieba-wasm");
+const {
+    isIgnoredSliceId,
+    normalizeCollectionId,
+    normalizeIgnoreIds,
+    shouldApplyIgnoreToCollection,
+} = require("./ignore_filter");
 
 const BM25_ROOT = path.join(__dirname, "data", "bm25_indexes");
 
@@ -560,8 +566,12 @@ class BM25Engine {
         topK = 3,
         type = "chat",
         ignoreIds = [],
+        ignoreCollectionId = null,
     ) {
         if (!queryText || dbConfigs.length === 0) return [];
+        const normalizedIgnoreIds = normalizeIgnoreIds(ignoreIds);
+        const normalizedIgnoreCollectionId =
+            normalizeCollectionId(ignoreCollectionId);
 
         // ✨ 新增：检索前，把本次检索涉及到的所有词典规则，都教给分词器
         dbConfigs.forEach((config) => this._syncJieba(config.dictionary));
@@ -671,13 +681,22 @@ class BM25Engine {
             });
 
             // 🟢 [新增核心逻辑]：剔除最近 N 楼的切片
-            if (ignoreIds && ignoreIds.length > 0) {
+            if (
+                normalizedIgnoreIds.length > 0 &&
+                shouldApplyIgnoreToCollection(
+                    safeDbId,
+                    normalizedIgnoreCollectionId,
+                )
+            ) {
                 const beforeCount = results.length;
-                results = results.filter(
-                    (res) =>
-                        !ignoreIds.includes(String(res.id)) &&
-                        !ignoreIds.includes(String(res.index)),
-                );
+                results = results.filter((res) => {
+                    const logicalId =
+                        res.index !== undefined ? res.index : res.id;
+                    return !isIgnoredSliceId(
+                        logicalId,
+                        normalizedIgnoreIds,
+                    );
+                });
                 // 打印跳过日志 (只有确实过滤掉了切片才打印，避免刷屏)
                 if (beforeCount > results.length) {
                     console.log(
@@ -780,9 +799,13 @@ class BM25Engine {
         dbConfigs,
         intentType,
         ignoreIds = [],
+        ignoreCollectionId = null,
     ) {
         if (!entities || entities.length === 0 || dbConfigs.length === 0)
             return [];
+        const normalizedIgnoreIds = normalizeIgnoreIds(ignoreIds);
+        const normalizedIgnoreCollectionId =
+            normalizeCollectionId(ignoreCollectionId);
 
         dbConfigs.forEach((config) => this._syncJieba(config.dictionary));
 
@@ -825,13 +848,22 @@ class BM25Engine {
             });
 
             // 🟢 [新增核心逻辑]：剔除最近 N 楼的切片，防止重复回响
-            if (ignoreIds && ignoreIds.length > 0) {
+            if (
+                normalizedIgnoreIds.length > 0 &&
+                shouldApplyIgnoreToCollection(
+                    safeDbId,
+                    normalizedIgnoreCollectionId,
+                )
+            ) {
                 const beforeCount = results.length;
-                results = results.filter(
-                    (res) =>
-                        !ignoreIds.includes(String(res.id)) &&
-                        !ignoreIds.includes(String(res.index)),
-                );
+                results = results.filter((res) => {
+                    const logicalId =
+                        res.index !== undefined ? res.index : res.id;
+                    return !isIgnoredSliceId(
+                        logicalId,
+                        normalizedIgnoreIds,
+                    );
+                });
                 // 打印跳过日志 (只有确实过滤掉了切片才打印，避免刷屏)
                 if (beforeCount > results.length) {
                     console.log(

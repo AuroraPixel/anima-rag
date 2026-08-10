@@ -18,19 +18,26 @@ index 6714c4b..43890bf 100644
                          return false;
                      }
                      else if (typeof value == 'string' && !filter[key].includes(value)) {
-@@ -147,7 +154,14 @@ class ItemSelector {
+@@ -147,12 +154,17 @@ class ItemSelector {
                      }
                      break;
                  case '$nin':
 -                    if (typeof value == 'boolean') {
 +                    // [修复] 处理 value 是数组的情况 (排除 tags)
 +                    if (Array.isArray(value)) {
-+                        // 如果 metadata 里的 tags 数组只要有任何一个存在于过滤数组中，则排除，返回 false
-+                        if (value.some(item => filter[key].includes(item))) {
++                        // 数组字段只按完整元素相等判断，禁止字符串子串误匹配
++                        if (value.some(item => filter[key].some(excluded => String(excluded) === String(item)))) {
 +                            return false;
 +                        }
 +                    }
 +                    else if (typeof value == 'boolean') {
                          return false;
                      }
-                     else if (typeof value == 'string' && filter[key].includes(value)) {
+-                    else if (typeof value == 'string' && filter[key].includes(value)) {
+-                        return false;
+-                    }
+-                    else if (filter[key].some(val => typeof val == 'string' && val.includes(value))) {
++                    // 字符串 ID 必须完整相等。例如排除 13_1 时不能误排除 3_1
++                    else if (filter[key].some(excluded => String(excluded) === String(value))) {
+                         return false;
+                     }
