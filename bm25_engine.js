@@ -8,6 +8,7 @@ const {
     normalizeIgnoreIds,
     shouldApplyIgnoreToCollection,
 } = require("./ignore_filter");
+const { findAffectedDocuments } = require("./dictionary_reindex");
 
 const BM25_ROOT = path.join(__dirname, "data", "bm25_indexes");
 
@@ -352,7 +353,7 @@ class BM25Engine {
         } else if (fs.existsSync(indexPath)) {
             const data = fs.readFileSync(indexPath, "utf8");
             miniSearch = MiniSearch.loadJSON(data, {
-                fields: ["text"],
+                fields: ["searchableText"],
                 storeFields: [
                     "id",
                     "text",
@@ -360,6 +361,9 @@ class BM25Engine {
                     "timestamp",
                     "index",
                     "batch_id",
+                    "chunk_index",
+                    "doc_name",
+                    "_source_db",
                 ],
                 tokenize: this._tokenize,
             });
@@ -421,18 +425,23 @@ class BM25Engine {
             });
 
             const doc = {
-                id: String(slice.index),
+                id: String(slice.id ?? slice.index),
                 index: slice.index,
                 text: slice.text,
                 tags: finalTags.length > 0 ? [...new Set(finalTags)] : [],
                 timestamp: slice.timestamp || Date.now(),
                 batch_id: slice.batch_id || 0,
+                chunk_index: slice.chunk_index,
+                doc_name: slice.doc_name,
                 searchableText: searchableParts.join(" "), // ⚠️ 修复：拼装隐藏搜索域
                 _source_db: safeDbId,
             };
 
-            if (miniSearch.has(doc.id)) miniSearch.discard(doc.id);
-            miniSearch.add(doc);
+            if (miniSearch.has(doc.id)) {
+                miniSearch.replace(doc);
+            } else {
+                miniSearch.add(doc);
+            }
             addedCount++;
         }
 
@@ -445,6 +454,65 @@ class BM25Engine {
         }
 
         return addedCount;
+    }
+
+    async rebuildAffectedDocuments(
+        dbId,
+        affectedTerms,
+        dictionary = [],
+    ) {
+        const safeDbId = this._getSafeDbId(dbId);
+        const indexPath = path.join(BM25_ROOT, `${safeDbId}.json`);
+
+        if (!fs.existsSync(indexPath)) {
+            return {
+                collectionId: safeDbId,
+                scanned: 0,
+                matched: 0,
+                rebuilt: 0,
+                missing: true,
+            };
+        }
+
+        const indexData = JSON.parse(fs.readFileSync(indexPath, "utf8"));
+        const storedFields = indexData.storedFields || {};
+        const allDocuments = Object.values(storedFields);
+        const matchedDocuments = findAffectedDocuments(
+            storedFields,
+            affectedTerms,
+        );
+
+        if (matchedDocuments.length === 0) {
+            return {
+                collectionId: safeDbId,
+                scanned: allDocuments.length,
+                matched: 0,
+                rebuilt: 0,
+                missing: false,
+            };
+        }
+
+        const slices = matchedDocuments.map((doc) => ({
+            id: doc.id,
+            index: doc.index ?? doc.id,
+            text: doc.text,
+            tags: doc.tags || [],
+            timestamp: doc.timestamp,
+            batch_id: doc.batch_id,
+            chunk_index: doc.chunk_index,
+            doc_name: doc.doc_name,
+        }));
+        const rebuilt = await this.buildIndexBatch(safeDbId, slices, {
+            dictionary,
+        });
+
+        return {
+            collectionId: safeDbId,
+            scanned: allDocuments.length,
+            matched: matchedDocuments.length,
+            rebuilt,
+            missing: false,
+        };
     }
 
     async upsertDocument(dbId, chunk, dictionary = [], type = "chat") {

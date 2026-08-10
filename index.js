@@ -9,6 +9,9 @@ const {
     buildScopedIgnoreFilter,
     normalizeIgnoreIds,
 } = require("./ignore_filter");
+const {
+    getDictionaryAffectedTerms,
+} = require("./dictionary_reindex");
 
 let stProxyConfig = {
     enabled: false,
@@ -2060,6 +2063,96 @@ async function init(router) {
             console.error("[Anima BM25] 批量重构路由异常:", e);
             res.json({ success: false, message: e.message });
         }
+    });
+
+    // 按词典差异扫描所有关联库，只重构命中本次变化的切片。
+    router.post("/bm25/rebuild_dictionary_affected", async (req, res) => {
+        const {
+            collectionIds,
+            oldDictionary = [],
+            newDictionary = [],
+        } = req.body;
+
+        if (!Array.isArray(collectionIds) || collectionIds.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "collectionIds must be a non-empty array",
+            });
+        }
+
+        const affectedTerms = getDictionaryAffectedTerms(
+            oldDictionary,
+            newDictionary,
+        );
+        const uniqueCollectionIds = [
+            ...new Set(
+                collectionIds
+                    .filter((id) => id !== undefined && id !== null)
+                    .map((id) => String(id).trim())
+                    .filter(Boolean),
+            ),
+        ];
+
+        if (affectedTerms.length === 0) {
+            return res.json({
+                success: true,
+                affectedTerms: [],
+                scanned: 0,
+                matched: 0,
+                rebuilt: 0,
+                results: [],
+            });
+        }
+
+        const results = [];
+        for (const collectionId of uniqueCollectionIds) {
+            const safeName = collectionId.replace(
+                /[^a-zA-Z0-9@\-\._\u4e00-\u9fa5]/g,
+                "_",
+            );
+            try {
+                const result = await runInQueue(safeName, () =>
+                    bm25Engine.rebuildAffectedDocuments(
+                        safeName,
+                        affectedTerms,
+                        newDictionary,
+                    ),
+                );
+                results.push({
+                    success: true,
+                    requestedCollectionId: collectionId,
+                    ...result,
+                });
+            } catch (error) {
+                results.push({
+                    success: false,
+                    requestedCollectionId: collectionId,
+                    collectionId: safeName,
+                    error: error.message,
+                });
+            }
+        }
+
+        const successfulResults = results.filter(
+            (result) => result.success === true,
+        );
+        res.json({
+            success: results.every((result) => result.success === true),
+            affectedTerms,
+            scanned: successfulResults.reduce(
+                (sum, result) => sum + (result.scanned || 0),
+                0,
+            ),
+            matched: successfulResults.reduce(
+                (sum, result) => sum + (result.matched || 0),
+                0,
+            ),
+            rebuilt: successfulResults.reduce(
+                (sum, result) => sum + (result.rebuilt || 0),
+                0,
+            ),
+            results,
+        });
     });
 
     router.post("/view_collection", async (req, res) => {
