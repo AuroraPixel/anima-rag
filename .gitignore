@@ -4,3 +4,5 @@ data/
 *.log
 *.tar
 *.tgz
+.DS_Store
+._*
