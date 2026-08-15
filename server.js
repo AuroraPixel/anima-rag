@@ -23,7 +23,6 @@ function parseCorsOrigin() {
 const corsOptions = {
     origin: parseCorsOrigin(),
     methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Anima-Rag-Token", "X-Requested-With"],
     credentials: false,
 };
 
